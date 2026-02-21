@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pio run:*)",
+      "Bash(findstr:*)",
+      "Read(//c/Users/dell/Desktop/CheckList/HEXAPOD_FINAL_CODE/Hexapod_Code_Stable_Release/**)"
+    ]
+  }
+}
