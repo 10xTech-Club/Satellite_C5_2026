@@ -35,6 +35,7 @@
 #include <ArduinoOTA.h>
 #include <esp_now.h>            // ESP-NOW replaces WebSocket client link to hexapod
 #include <esp_idf_version.h>    // for ESP_IDF_VERSION_MAJOR check
+#include <esp_wifi.h>           // for esp_wifi_get_mac()
 
 // ============================================================
 // CONFIGURATION
@@ -155,6 +156,42 @@ static unsigned long resetRequestedAt = 0;
 #define ESPNOW_DEVICE_HEXAPOD 0x01
 #define ESPNOW_DEVICE_ROVER   0x02
 
+#define DEVICE_ID_SATELLITE 0x01
+#define DEVICE_ID_ROVER 0x02
+#define DEVICE_ID_HEXAPOD 0x03
+#define DEVICE_ID_BROADCAST 0xFF
+
+#define ESPNOW_PKT_CHAT 0x91
+#define ESPNOW_PKT_COMMAND 0x92
+#define ESPNOW_PKT_MIRROR_LOG 0x93
+
+struct __attribute__((packed)) EspNowHeader {
+  uint8_t sender_id;
+  uint8_t receiver_id;
+  uint8_t packet_type;
+  uint16_t sequence_no;
+};
+
+struct __attribute__((packed)) EspNowCommandV2 {
+  EspNowHeader header;
+  char cmd[16];
+};
+
+struct __attribute__((packed)) EspNowChatV2 {
+  EspNowHeader header;
+  char from[16];
+  char to[16];
+  char msg[64];
+};
+
+struct __attribute__((packed)) EspNowMirrorLogV2 {
+  EspNowHeader header;
+  uint8_t original_sender;
+  uint8_t original_receiver;
+  uint8_t original_packet_type;
+  char msg[64];
+};
+
 struct __attribute__((packed)) EspNowTelemetry {
   uint8_t  msgType;
   uint8_t  deviceType;   // ESPNOW_DEVICE_HEXAPOD
@@ -196,23 +233,29 @@ struct __attribute__((packed)) EspNowCommand {
 struct __attribute__((packed)) EspNowChat {
   uint8_t  msgType;
   char     from[16];
+  char     to[16];    // intended recipient: "satellite" | "hexapod" | "rover" | "all"
   char     msg[64];
-};  // 81 bytes
+};  // 97 bytes
 
-// Broadcast MAC — fallback before device real MACs are learned.
-static uint8_t hexMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+// ============================================================
+// ESP-NOW DEVICE MAC ADDRESSES — FILL THESE IN ONCE
+// ============================================================
+// Flash each device, open Serial Monitor, and read the line:
+//   "AP MAC: XX:XX:XX:XX:XX:XX"
+// Paste those bytes below, then reflash the satellite.
+// ── HEXAPOD (ESP8266) AP MAC ──────────────────────────────
+static uint8_t HEXAPOD_MAC[6] = {0x42, 0x91, 0x51, 0x5B, 0x7F, 0xA2}; // Hexapod ESP8266 AP MAC
+// ── ROVER (ESP32) AP MAC ──────────────────────────────────
+static uint8_t ROVER_MAC[6]   = {0x88, 0x57, 0x21, 0x79, 0xB1, 0x19}; // Rover ESP32 AP MAC
+// ============================================================
 
-// Hexapod's actual AP MAC — learned from the first incoming telemetry packet.
-// Sending to a unicast MAC is far more reliable on ESP8266 than sending to
-// broadcast, which the ESP8266 recv callback may silently ignore.
-static uint8_t       hexapodActualMac[6] = {0,0,0,0,0,0};
-static volatile bool hexapodMacKnown     = false;
-static volatile bool pendingAddHexPeer   = false;
-
-// Rover's actual AP MAC — learned from the first incoming rover telemetry.
-static uint8_t       roverActualMac[6]    = {0,0,0,0,0,0};
-static volatile bool roverMacKnown        = false;
-static volatile bool pendingAddRoverPeer  = false;
+// Link-status tracking — timestamp of last received telemetry from each device.
+// Compared against DEVICE_TIMEOUT_MS in loop() to detect disconnections.
+static unsigned long hexLastRxMs       = 0;
+static unsigned long roverLastRxMs     = 0;
+static const unsigned long DEVICE_TIMEOUT_MS = 10000UL; // offline after 10 s silence
+static bool          hexWasConnected   = false;
+static bool          roverWasConnected = false;
 
 // Pending telemetry relay — set in ESP-NOW recv callback (WiFi task),
 // consumed in loop() where ws.textAll() is safe to call.
@@ -220,6 +263,34 @@ static volatile bool pendingHexTelemetry   = false;
 static char          hexTelemetryJson[320] = "";
 static volatile bool pendingRoverTelemetry  = false;
 static char          roverTelemetryJson[320] = "";
+
+// Pending chat relay — also deferred from the WiFi-task callback to loop().
+// pendingWsChatBroadcast: broadcast the chat JSON to all satellite dashboard clients.
+// pendingChatRelay:       forward the chat to the OTHER device via ESP-NOW.
+//   pendingChatRelayTarget bits: bit0 = hexapod, bit1 = rover
+static volatile bool    pendingWsChatBroadcast  = false;
+static volatile bool    pendingChatRelay         = false;
+static char             pendingChatJson[256]     = "";
+static char             pendingChatRelayFrom[16] = "";
+static char             pendingChatRelayTo[16]   = "";   // resolved relay target label
+static char             pendingChatRelayMsg[64]  = "";
+static volatile uint8_t pendingChatRelayTarget   = 0;
+static uint16_t         localSeqNo               = 0;
+
+static uint16_t nextSequence() {
+    localSeqNo++;
+    return localSeqNo;
+}
+
+static const char* deviceIdToName(uint8_t id) {
+    switch (id) {
+        case DEVICE_ID_SATELLITE: return "satellite";
+        case DEVICE_ID_ROVER: return "rover";
+        case DEVICE_ID_HEXAPOD: return "hexapod";
+        case DEVICE_ID_BROADCAST: return "all";
+        default: return "unknown";
+    }
+}
 
 // ============================================================
 // FUNCTION DECLARATIONS
@@ -232,9 +303,9 @@ void initServos();
 void initWebServer();
 void initEspNow();
 void sendCommandEspNow(const char* cmd);
-void sendChatEspNow(const char* from, const char* msg);
+void sendChatEspNow(const char* from, const char* to, const char* msg);
 void sendRoverCommandEspNow(const char* cmd);
-void sendRoverChatEspNow(const char* from, const char* msg);
+void sendRoverChatEspNow(const char* from, const char* to, const char* msg);
 void initFileSystem();
 void updateTelemetry();
 void broadcastTelemetry();
@@ -332,48 +403,46 @@ void loop() {
         if (ws.count() > 0) ws.textAll(hexTelemetryJson);
     }
 
-    // ── Register hexapod unicast peer once its AP MAC is learned ──────────────
-    // esp_now_add_peer() must be called from the main task, not from the
-    // WiFi-task recv callback — so we defer it here via a flag.
-    if (pendingAddHexPeer && !hexapodMacKnown) {
-        pendingAddHexPeer = false;
-        esp_now_peer_info_t peer = {};
-        memcpy(peer.peer_addr, hexapodActualMac, 6);
-        peer.channel = 0;
-        peer.ifidx   = WIFI_IF_AP;
-        peer.encrypt = false;
-        if (esp_now_add_peer(&peer) == ESP_OK) {
-            hexapodMacKnown = true;
-            Serial.printf("[ESP-NOW] Hexapod MAC learned: %02X:%02X:%02X:%02X:%02X:%02X\n",
-                hexapodActualMac[0], hexapodActualMac[1], hexapodActualMac[2],
-                hexapodActualMac[3], hexapodActualMac[4], hexapodActualMac[5]);
-        } else {
-            Serial.println("[ESP-NOW] Failed to add hexapod unicast peer");
-        }
-    }
-
     // ── Relay rover ESP-NOW telemetry → dashboard browsers ────────────────────
     if (pendingRoverTelemetry) {
         pendingRoverTelemetry = false;
         if (ws.count() > 0) ws.textAll(roverTelemetryJson);
     }
 
-    // ── Register rover unicast peer once its AP MAC is learned ────────────────
-    if (pendingAddRoverPeer && !roverMacKnown) {
-        pendingAddRoverPeer = false;
-        esp_now_peer_info_t roverPeer = {};
-        memcpy(roverPeer.peer_addr, roverActualMac, 6);
-        roverPeer.channel = 0;
-        roverPeer.ifidx   = WIFI_IF_AP;
-        roverPeer.encrypt = false;
-        if (esp_now_add_peer(&roverPeer) == ESP_OK) {
-            roverMacKnown = true;
-            Serial.printf("[ESP-NOW] Rover MAC learned: %02X:%02X:%02X:%02X:%02X:%02X\n",
-                roverActualMac[0], roverActualMac[1], roverActualMac[2],
-                roverActualMac[3], roverActualMac[4], roverActualMac[5]);
-        } else {
-            Serial.println("[ESP-NOW] Failed to add rover unicast peer");
+    // ── Device link timeout monitoring ─────────────────────────────────────────
+    // Emit device_status whenever either device goes online or offline.
+    {
+        bool hexNow   = hexLastRxMs   > 0 && (millis() - hexLastRxMs   < DEVICE_TIMEOUT_MS);
+        bool roverNow = roverLastRxMs > 0 && (millis() - roverLastRxMs < DEVICE_TIMEOUT_MS);
+        if (hexNow != hexWasConnected || roverNow != roverWasConnected) {
+            hexWasConnected   = hexNow;
+            roverWasConnected = roverNow;
+            Serial.printf("[STATUS] Hexapod:%s  Rover:%s\n",
+                hexNow ? "ONLINE" : "OFFLINE", roverNow ? "ONLINE" : "OFFLINE");
+            if (ws.count() > 0) {
+                JsonDocument sDoc;
+                sDoc["type"]           = "device_status";
+                sDoc["hexConnected"]   = hexNow;
+                sDoc["roverConnected"] = roverNow;
+                String sMsg;
+                serializeJson(sDoc, sMsg);
+                ws.textAll(sMsg);
+            }
         }
+    }
+
+    // ── Relay incoming ESP-NOW chat → satellite dashboard (deferred from WiFi task) ─
+    if (pendingWsChatBroadcast) {
+        pendingWsChatBroadcast = false;
+        if (ws.count() > 0) ws.textAll(pendingChatJson);
+    }
+
+    // ── Cross-relay ESP-NOW chat between devices ──────────────────────────────────
+    // bit0 = send to hexapod, bit1 = send to rover
+    if (pendingChatRelay) {
+        pendingChatRelay = false;
+        if (pendingChatRelayTarget & 1) sendChatEspNow(pendingChatRelayFrom, pendingChatRelayTo, pendingChatRelayMsg);
+        if (pendingChatRelayTarget & 2) sendRoverChatEspNow(pendingChatRelayFrom, pendingChatRelayTo, pendingChatRelayMsg);
     }
 
     static unsigned long lastBlink = 0;
@@ -902,10 +971,10 @@ void handleWebSocketMessage(void *arg, uint8_t *data, size_t len, AsyncWebSocket
 
             // Forward chat to hexapod and/or rover via ESP-NOW as appropriate.
             if (to == "hexapod" || to == "all") {
-                sendChatEspNow(from.c_str(), msg.c_str());
+                sendChatEspNow(from.c_str(), to.c_str(), msg.c_str());
             }
             if (to == "rover" || to == "all") {
-                sendRoverChatEspNow(from.c_str(), msg.c_str());
+                sendRoverChatEspNow(from.c_str(), to.c_str(), msg.c_str());
             }
 
             // Relay to WS clients (dashboards and any other WS devices)
@@ -993,6 +1062,58 @@ void onEspNowRecv(const esp_now_recv_info_t *recv_info, const uint8_t *data, int
 #else
 void onEspNowRecv(const uint8_t *mac, const uint8_t *data, int len) {
 #endif
+    if (len >= (int)sizeof(EspNowHeader)) {
+        const EspNowHeader* header = (const EspNowHeader*)data;
+        const bool isV2Type = header->packet_type == ESPNOW_PKT_COMMAND ||
+                              header->packet_type == ESPNOW_PKT_CHAT ||
+                              header->packet_type == ESPNOW_PKT_MIRROR_LOG;
+
+        if (isV2Type) {
+            if (header->receiver_id != DEVICE_ID_SATELLITE &&
+                header->receiver_id != DEVICE_ID_BROADCAST) {
+                return;
+            }
+
+            if (header->packet_type == ESPNOW_PKT_CHAT && len >= (int)sizeof(EspNowChatV2)) {
+                const EspNowChatV2* pkt = (const EspNowChatV2*)data;
+
+                const char* relayTo = pkt->to[0] ? pkt->to : "satellite";
+                uint8_t relayTarget = 0;
+                if (strcmp(relayTo, "hexapod") == 0 || strcmp(relayTo, "all") == 0) relayTarget |= 1;
+                if (strcmp(relayTo, "rover")   == 0 || strcmp(relayTo, "all") == 0) relayTarget |= 2;
+
+                JsonDocument doc;
+                doc["type"] = "chat";
+                doc["from"] = pkt->from;
+                doc["to"]   = relayTo;
+                doc["msg"]  = pkt->msg;
+                serializeJson(doc, pendingChatJson, sizeof(pendingChatJson));
+                pendingWsChatBroadcast = true;
+
+                if (relayTarget != 0) {
+                    strncpy(pendingChatRelayFrom, pkt->from, sizeof(pendingChatRelayFrom) - 1);
+                    pendingChatRelayFrom[sizeof(pendingChatRelayFrom) - 1] = '\0';
+                    strncpy(pendingChatRelayTo, relayTo, sizeof(pendingChatRelayTo) - 1);
+                    pendingChatRelayTo[sizeof(pendingChatRelayTo) - 1] = '\0';
+                    strncpy(pendingChatRelayMsg, pkt->msg, sizeof(pendingChatRelayMsg) - 1);
+                    pendingChatRelayMsg[sizeof(pendingChatRelayMsg) - 1] = '\0';
+                    pendingChatRelayTarget = relayTarget;
+                    pendingChatRelay = true;
+                }
+            } else if (header->packet_type == ESPNOW_PKT_MIRROR_LOG && len >= (int)sizeof(EspNowMirrorLogV2)) {
+                const EspNowMirrorLogV2* pkt = (const EspNowMirrorLogV2*)data;
+                JsonDocument doc;
+                doc["type"] = "chat";
+                doc["from"] = "mirror";
+                doc["to"]  = "dashboard";
+                doc["msg"] = pkt->msg;
+                serializeJson(doc, pendingChatJson, sizeof(pendingChatJson));
+                pendingWsChatBroadcast = true;
+            }
+            return;
+        }
+    }
+
     // Require at least msgType + deviceType bytes.
     if (len < 2) return;
 
@@ -1003,11 +1124,7 @@ void onEspNowRecv(const uint8_t *mac, const uint8_t *data, int len) {
 
         if (deviceType == ESPNOW_DEVICE_HEXAPOD && len >= (int)sizeof(EspNowTelemetry)) {
             // ── Hexapod telemetry ────────────────────────────────────────────
-            // Learn the hexapod's AP MAC so we can send unicast back to it.
-            if (!hexapodMacKnown) {
-                memcpy(hexapodActualMac, mac, 6);
-                pendingAddHexPeer = true;  // registered safely in loop()
-            }
+            hexLastRxMs = millis();  // update link timestamp
             const EspNowTelemetry* pkt = (const EspNowTelemetry*)data;
             JsonDocument doc;
             doc["type"]   = "telemetry";
@@ -1028,11 +1145,7 @@ void onEspNowRecv(const uint8_t *mac, const uint8_t *data, int len) {
         }
         else if (deviceType == ESPNOW_DEVICE_ROVER && len >= (int)sizeof(EspNowRoverTelemetry)) {
             // ── Rover telemetry ──────────────────────────────────────────────
-            // Learn the rover's AP MAC so we can send unicast commands back.
-            if (!roverMacKnown) {
-                memcpy(roverActualMac, mac, 6);
-                pendingAddRoverPeer = true;  // registered safely in loop()
-            }
+            roverLastRxMs = millis();  // update link timestamp
             const EspNowRoverTelemetry* pkt = (const EspNowRoverTelemetry*)data;
             // Decode mode/motion codes to strings the dashboard expects.
             const char* modeStr  = (pkt->mode == 1) ? "Auto" : "Manual";
@@ -1057,20 +1170,57 @@ void onEspNowRecv(const uint8_t *mac, const uint8_t *data, int len) {
     }
     else if (msgType == ESPNOW_MSG_CHAT && len >= (int)sizeof(EspNowChat)) {
         const EspNowChat* pkt = (const EspNowChat*)data;
-        // Relay chat to all dashboard WebSocket clients.
+
+        // Determine relay targets.
+        // Prefer the explicit "to" field the sender filled in; fall back to
+        // from-based guessing so old firmware (without the "to" field) still works.
+        const char* relayTo  = "satellite";
+        uint8_t  relayTarget = 0;
+
+        if (pkt->to[0] != '\0') {
+            // Sender specified the intended recipient — use it directly.
+            relayTo = pkt->to;
+            if (strcmp(pkt->to, "hexapod") == 0 || strcmp(pkt->to, "all") == 0) relayTarget |= 1;
+            if (strcmp(pkt->to, "rover")   == 0 || strcmp(pkt->to, "all") == 0) relayTarget |= 2;
+            // "satellite" → relayTarget stays 0: show on dashboard only, no relay
+        } else {
+            // Backward-compat fallback (old firmware without "to" field).
+            if (strncmp(pkt->from, "hexapod", 7) == 0) { relayTo = "rover";    relayTarget = 2; }
+            else if (strncmp(pkt->from, "rover", 5) == 0) { relayTo = "hexapod"; relayTarget = 1; }
+        }
+
+        // Build chat JSON for the satellite dashboard (deferred to loop()).
         JsonDocument doc;
         doc["type"] = "chat";
         doc["from"] = pkt->from;
+        doc["to"]   = relayTo;
         doc["msg"]  = pkt->msg;
-        char buf[192];
-        serializeJson(doc, buf, sizeof(buf));
-        ws.textAll(buf);
-        Serial.printf("[ESP-NOW] Chat from %s: %s\n", pkt->from, pkt->msg);
+        serializeJson(doc, pendingChatJson, sizeof(pendingChatJson));
+        pendingWsChatBroadcast = true;
+
+        // Store relay parameters for cross-device forwarding in loop().
+        strncpy(pendingChatRelayFrom, pkt->from,  sizeof(pendingChatRelayFrom) - 1);
+        pendingChatRelayFrom[sizeof(pendingChatRelayFrom) - 1] = '\0';
+        strncpy(pendingChatRelayTo,   relayTo,    sizeof(pendingChatRelayTo)   - 1);
+        pendingChatRelayTo[sizeof(pendingChatRelayTo) - 1] = '\0';
+        strncpy(pendingChatRelayMsg,  pkt->msg,   sizeof(pendingChatRelayMsg)  - 1);
+        pendingChatRelayMsg[sizeof(pendingChatRelayMsg) - 1] = '\0';
+        pendingChatRelayTarget = relayTarget;
+        pendingChatRelay       = true;
+
+        Serial.printf("[ESP-NOW] Chat from:%s to:%s relay→%s msg:%s\n",
+                      pkt->from, pkt->to[0] ? pkt->to : "?", relayTo, pkt->msg);
     }
 }
 
 // Called after WiFi AP is up so esp_now_init() can use the radio.
 void initEspNow() {
+    // Print own AP MAC so you can copy it into the other devices' config.
+    uint8_t myMac[6];
+    esp_wifi_get_mac(WIFI_IF_AP, myMac);
+    Serial.printf("[ESP-NOW] Satellite AP MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                  myMac[0], myMac[1], myMac[2], myMac[3], myMac[4], myMac[5]);
+
     if (esp_now_init() != ESP_OK) {
         Serial.println("[ESP-NOW] Init failed!");
         return;
@@ -1078,70 +1228,95 @@ void initEspNow() {
     esp_now_register_send_cb(onEspNowSent);
     esp_now_register_recv_cb(onEspNowRecv);
 
-    // Add broadcast peer — channel 0 means "use current WiFi channel" (ch 6).
-    // ifidx MUST be WIFI_IF_AP because the satellite runs in AP-only mode.
-    // Default (0 = WIFI_IF_STA) is inactive here and causes outgoing sends to fail.
-    esp_now_peer_info_t peerInfo = {};
-    memcpy(peerInfo.peer_addr, hexMac, 6);
-    peerInfo.channel = 0;
-    peerInfo.ifidx   = WIFI_IF_AP;   // satellite is AP-only; STA interface is not active
-    peerInfo.encrypt = false;
-    if (esp_now_add_peer(&peerInfo) != ESP_OK) {
-        Serial.println("[ESP-NOW] Add peer failed!");
-        return;
-    }
-    Serial.println("[ESP-NOW] Initialized — broadcast peer on ch 6");
+    // Register hexapod unicast peer.
+    // ifidx MUST be WIFI_IF_AP — satellite is AP-only; STA interface is inactive.
+    esp_now_peer_info_t hexPeer = {};
+    memcpy(hexPeer.peer_addr, HEXAPOD_MAC, 6);
+    hexPeer.channel = 0;   // 0 = use current WiFi channel (ch 6)
+    hexPeer.ifidx   = WIFI_IF_AP;
+    hexPeer.encrypt = false;
+    if (esp_now_add_peer(&hexPeer) == ESP_OK)
+        Serial.printf("[ESP-NOW] Hexapod peer registered: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                      HEXAPOD_MAC[0], HEXAPOD_MAC[1], HEXAPOD_MAC[2],
+                      HEXAPOD_MAC[3], HEXAPOD_MAC[4], HEXAPOD_MAC[5]);
+    else
+        Serial.println("[ESP-NOW] WARNING: Hexapod peer failed — update HEXAPOD_MAC");
+
+    // Register rover unicast peer.
+    esp_now_peer_info_t roverPeer = {};
+    memcpy(roverPeer.peer_addr, ROVER_MAC, 6);
+    roverPeer.channel = 0;
+    roverPeer.ifidx   = WIFI_IF_AP;
+    roverPeer.encrypt = false;
+    if (esp_now_add_peer(&roverPeer) == ESP_OK)
+        Serial.printf("[ESP-NOW] Rover peer registered:   %02X:%02X:%02X:%02X:%02X:%02X\n",
+                      ROVER_MAC[0], ROVER_MAC[1], ROVER_MAC[2],
+                      ROVER_MAC[3], ROVER_MAC[4], ROVER_MAC[5]);
+    else
+        Serial.println("[ESP-NOW] WARNING: Rover peer failed — update ROVER_MAC");
+
+    Serial.println("[ESP-NOW] Initialized — unicast peers registered on ch 6");
 }
 
 void sendCommandEspNow(const char* cmd) {
-    EspNowCommand pkt;
-    pkt.msgType = ESPNOW_MSG_COMMAND;
+    EspNowCommandV2 pkt = {};
+    pkt.header.sender_id = DEVICE_ID_SATELLITE;
+    pkt.header.receiver_id = DEVICE_ID_HEXAPOD;
+    pkt.header.packet_type = ESPNOW_PKT_COMMAND;
+    pkt.header.sequence_no = nextSequence();
     strncpy(pkt.cmd, cmd, sizeof(pkt.cmd) - 1);
     pkt.cmd[sizeof(pkt.cmd) - 1] = '\0';
-    // Prefer unicast to hexapod's real AP MAC; fall back to broadcast until
-    // the MAC is learned from the first incoming telemetry packet.
-    const uint8_t* dest = hexapodMacKnown ? hexapodActualMac : hexMac;
-    esp_err_t result = esp_now_send(dest, (uint8_t*)&pkt, sizeof(pkt));
+    esp_err_t result = esp_now_send(HEXAPOD_MAC, (uint8_t*)&pkt, sizeof(pkt));
     if (result != ESP_OK) {
         Serial.printf("[ESP-NOW] Command send failed: %d\n", result);
     }
 }
 
-void sendChatEspNow(const char* from, const char* msg) {
-    EspNowChat pkt;
-    pkt.msgType = ESPNOW_MSG_CHAT;
+void sendChatEspNow(const char* from, const char* to, const char* msg) {
+    EspNowChatV2 pkt = {};
+    pkt.header.sender_id = DEVICE_ID_SATELLITE;
+    pkt.header.receiver_id = DEVICE_ID_HEXAPOD;
+    pkt.header.packet_type = ESPNOW_PKT_CHAT;
+    pkt.header.sequence_no = nextSequence();
     strncpy(pkt.from, from, sizeof(pkt.from) - 1);
     pkt.from[sizeof(pkt.from) - 1] = '\0';
-    strncpy(pkt.msg, msg, sizeof(pkt.msg) - 1);
+    strncpy(pkt.to,   to,   sizeof(pkt.to)   - 1);
+    pkt.to[sizeof(pkt.to) - 1] = '\0';
+    strncpy(pkt.msg,  msg,  sizeof(pkt.msg)  - 1);
     pkt.msg[sizeof(pkt.msg) - 1] = '\0';
-    const uint8_t* dest = hexapodMacKnown ? hexapodActualMac : hexMac;
-    esp_err_t result = esp_now_send(dest, (uint8_t*)&pkt, sizeof(pkt));
+    esp_err_t result = esp_now_send(HEXAPOD_MAC, (uint8_t*)&pkt, sizeof(pkt));
     if (result != ESP_OK) {
         Serial.printf("[ESP-NOW] Hexapod chat send failed: %d\n", result);
     }
 }
 
 void sendRoverCommandEspNow(const char* cmd) {
-    EspNowCommand pkt;
-    pkt.msgType = ESPNOW_MSG_COMMAND;
+    EspNowCommandV2 pkt = {};
+    pkt.header.sender_id = DEVICE_ID_SATELLITE;
+    pkt.header.receiver_id = DEVICE_ID_ROVER;
+    pkt.header.packet_type = ESPNOW_PKT_COMMAND;
+    pkt.header.sequence_no = nextSequence();
     strncpy(pkt.cmd, cmd, sizeof(pkt.cmd) - 1);
     pkt.cmd[sizeof(pkt.cmd) - 1] = '\0';
-    const uint8_t* dest = roverMacKnown ? roverActualMac : hexMac;
-    esp_err_t result = esp_now_send(dest, (uint8_t*)&pkt, sizeof(pkt));
+    esp_err_t result = esp_now_send(ROVER_MAC, (uint8_t*)&pkt, sizeof(pkt));
     if (result != ESP_OK) {
         Serial.printf("[ESP-NOW] Rover command send failed: %d\n", result);
     }
 }
 
-void sendRoverChatEspNow(const char* from, const char* msg) {
-    EspNowChat pkt;
-    pkt.msgType = ESPNOW_MSG_CHAT;
+void sendRoverChatEspNow(const char* from, const char* to, const char* msg) {
+    EspNowChatV2 pkt = {};
+    pkt.header.sender_id = DEVICE_ID_SATELLITE;
+    pkt.header.receiver_id = DEVICE_ID_ROVER;
+    pkt.header.packet_type = ESPNOW_PKT_CHAT;
+    pkt.header.sequence_no = nextSequence();
     strncpy(pkt.from, from, sizeof(pkt.from) - 1);
     pkt.from[sizeof(pkt.from) - 1] = '\0';
-    strncpy(pkt.msg, msg, sizeof(pkt.msg) - 1);
+    strncpy(pkt.to,   to,   sizeof(pkt.to)   - 1);
+    pkt.to[sizeof(pkt.to) - 1] = '\0';
+    strncpy(pkt.msg,  msg,  sizeof(pkt.msg)  - 1);
     pkt.msg[sizeof(pkt.msg) - 1] = '\0';
-    const uint8_t* dest = roverMacKnown ? roverActualMac : hexMac;
-    esp_err_t result = esp_now_send(dest, (uint8_t*)&pkt, sizeof(pkt));
+    esp_err_t result = esp_now_send(ROVER_MAC, (uint8_t*)&pkt, sizeof(pkt));
     if (result != ESP_OK) {
         Serial.printf("[ESP-NOW] Rover chat send failed: %d\n", result);
     }

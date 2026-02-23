@@ -316,6 +316,17 @@ function hideTopoDevice(device) {
 }
 
 function onChatMessage(from, msg, to) {
+    if ((from || '').toLowerCase() === 'mirror') {
+        addChatMessage('MIRROR -> DASHBOARD', msg, 'dashboard', 'mirror');
+        return;
+    }
+    const src = (from || '').toLowerCase();
+    const dst = (to || '').toLowerCase();
+    if ((src === 'rover' || src === 'hexapod') && (dst === 'rover' || dst === 'hexapod') && src !== dst) {
+        // Visualize hub relay path: device -> satellite -> device.
+        triggerDataFlow(src, 'satellite');
+        triggerDataFlow('satellite', dst);
+    }
     addChatMessage(from || 'unknown', msg, to || 'all', 'in');
 }
 
@@ -746,7 +757,7 @@ function sendGroupChat() {
 
     if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'chat', from: 'satellite', to: chatRecipient, msg }));
-        addChatMessage('SATELLITE', msg, chatRecipient, 'out');
+        addChatMessage('SATELLITE RELAY', msg, chatRecipient, 'out');
         input.value = '';
     } else {
         addChatMessage('SYSTEM', 'Not connected to satellite', 'all', 'sys');
@@ -763,10 +774,11 @@ function addChatMessage(from, msg, to, direction) {
         div.className = 'sat-chat-sys';
         div.textContent = `— ${msg} —`;
     } else {
-        div.className = 'sat-chat-msg ' + (direction === 'out' ? 'sat-msg-out' : 'sat-msg-in');
+        const directionClass = direction === 'out' ? 'sat-msg-out' : (direction === 'mirror' ? 'sat-msg-mirror' : 'sat-msg-in');
+        div.className = 'sat-chat-msg ' + directionClass;
         const now  = new Date();
         const time = now.getHours().toString().padStart(2,'0') + ':' + now.getMinutes().toString().padStart(2,'0');
-        const toLabel = (to && to !== 'all') ? ` → ${to.toUpperCase()}` : '';
+        const toLabel = (to && to !== 'all' && direction !== 'mirror') ? ` → ${to.toUpperCase()} (VIA SAT)` : '';
         div.innerHTML =
             `<span class="sat-chat-from">${from.toUpperCase()}${toLabel}</span>` +
             `<span class="sat-chat-text">${msg}</span>` +

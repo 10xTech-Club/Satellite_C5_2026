@@ -555,6 +555,7 @@ input[type="range"]::-webkit-slider-thumb {
 }
 .sat-msg-in  .sat-chat-from { color: var(--accent-orange); }
 .sat-msg-out .sat-chat-from { color: var(--accent-cyan); }
+.sat-msg-mirror .sat-chat-from { color: #ffd166; }
 
 .sat-chat-text {
     background: rgba(255,255,255,0.05);
@@ -565,6 +566,10 @@ input[type="range"]::-webkit-slider-thumb {
     word-break: break-word;
 }
 .sat-msg-out .sat-chat-text { background: rgba(0,242,255,0.08); }
+.sat-msg-mirror .sat-chat-text {
+    background: rgba(255, 209, 102, 0.12);
+    border: 1px solid rgba(255, 209, 102, 0.35);
+}
 
 .sat-chat-time { font-size: 9px; color: var(--text-secondary); flex-shrink: 0; }
 
@@ -733,6 +738,13 @@ input[type="range"]::-webkit-slider-thumb {
     color: var(--accent-cyan);
     border-color: rgba(0, 242, 255, 0.35);
     box-shadow: 0 0 8px rgba(0, 242, 255, 0.1);
+}
+
+.chat-relay-note {
+    margin-top: 0.2rem;
+    font-size: 0.58rem;
+    color: var(--text-secondary);
+    letter-spacing: 0.05em;
 }
 
 /* Rover state colours already handled by text-* classes */
