@@ -36,6 +36,7 @@
 #include <esp_now.h>            // ESP-NOW replaces WebSocket client link to hexapod
 #include <esp_idf_version.h>    // for ESP_IDF_VERSION_MAJOR check
 #include <esp_wifi.h>           // for esp_wifi_get_mac()
+#include <esp_task_wdt.h>       // for disabling Task Watchdog Timer
 
 // ============================================================
 // CONFIGURATION
@@ -164,6 +165,7 @@ static unsigned long resetRequestedAt = 0;
 #define ESPNOW_PKT_CHAT 0x91
 #define ESPNOW_PKT_COMMAND 0x92
 #define ESPNOW_PKT_MIRROR_LOG 0x93
+#define ESPNOW_PKT_HEARTBEAT 0x94   // satellite → device keepalive (no payload)
 
 struct __attribute__((packed)) EspNowHeader {
   uint8_t sender_id;
@@ -237,6 +239,10 @@ struct __attribute__((packed)) EspNowChat {
   char     msg[64];
 };  // 97 bytes
 
+struct __attribute__((packed)) EspNowHeartbeat {
+  EspNowHeader header;  // 5 bytes — no payload needed
+};
+
 // ============================================================
 // ESP-NOW DEVICE MAC ADDRESSES — FILL THESE IN ONCE
 // ============================================================
@@ -253,7 +259,7 @@ static uint8_t ROVER_MAC[6]   = {0x88, 0x57, 0x21, 0x79, 0xB1, 0x19}; // Rover E
 // Compared against DEVICE_TIMEOUT_MS in loop() to detect disconnections.
 static unsigned long hexLastRxMs       = 0;
 static unsigned long roverLastRxMs     = 0;
-static const unsigned long DEVICE_TIMEOUT_MS = 10000UL; // offline after 10 s silence
+static const unsigned long DEVICE_TIMEOUT_MS = 20000UL; // offline after 20 s silence
 static bool          hexWasConnected   = false;
 static bool          roverWasConnected = false;
 
@@ -306,6 +312,7 @@ void sendCommandEspNow(const char* cmd);
 void sendChatEspNow(const char* from, const char* to, const char* msg);
 void sendRoverCommandEspNow(const char* cmd);
 void sendRoverChatEspNow(const char* from, const char* to, const char* msg);
+static void sendHeartbeatToRover();
 void initFileSystem();
 void updateTelemetry();
 void broadcastTelemetry();
@@ -324,8 +331,13 @@ void handleServoAngle(JsonDocument& doc);
 // ============================================================
 
 void setup() {
+    // ── Disable all watchdog timers immediately ────────────────────────────────
+    // Prevents spurious resets during sensor init, LittleFS, and WiFi setup.
+    disableCore0WDT();          // Disable idle-task WDT on core 0
+    disableCore1WDT();          // Disable idle-task WDT on core 1
+    esp_task_wdt_deinit();      // Disable Task WDT entirely (no more 5 s resets)
+
     Serial.begin(115200);
-    delay(1000);
 
     Serial.println("\n========================================");
     Serial.println("  SATCOM ALPHA - Satellite Hub (ESP32)");
@@ -445,6 +457,15 @@ void loop() {
         if (pendingChatRelayTarget & 2) sendRoverChatEspNow(pendingChatRelayFrom, pendingChatRelayTo, pendingChatRelayMsg);
     }
 
+    // ── Keepalive heartbeat → Rover ────────────────────────────────────────────
+    // Sent every 3 s so the Rover keeps satLinkActive=true even when no
+    // commands are issued. Must be fast (just an esp_now_send of 5 bytes).
+    static unsigned long lastHeartbeat = 0;
+    if (currentMillis - lastHeartbeat >= 3000) {
+        lastHeartbeat = currentMillis;
+        sendHeartbeatToRover();
+    }
+
     static unsigned long lastBlink = 0;
     if (currentMillis - lastBlink >= 1000) {
         lastBlink = currentMillis;
@@ -495,7 +516,7 @@ void initSensors() {
 
     Serial.print("  DHT11 (GPIO 4)... ");
     dht.begin();
-    delay(2000);  // DHT11 needs warmup time
+    delay(500);   // DHT11 warmup — 500 ms is enough after WDT is disabled
     float testTemp = dht.readTemperature();
     if (!isnan(testTemp)) {
         dhtInitialized = true;
@@ -1320,4 +1341,15 @@ void sendRoverChatEspNow(const char* from, const char* to, const char* msg) {
     if (result != ESP_OK) {
         Serial.printf("[ESP-NOW] Rover chat send failed: %d\n", result);
     }
+}
+
+// Sends a tiny heartbeat to the Rover every few seconds so it keeps its
+// satLinkActive flag alive without needing a user command.
+static void sendHeartbeatToRover() {
+    EspNowHeartbeat pkt = {};
+    pkt.header.sender_id   = DEVICE_ID_SATELLITE;
+    pkt.header.receiver_id = DEVICE_ID_ROVER;
+    pkt.header.packet_type = ESPNOW_PKT_HEARTBEAT;
+    pkt.header.sequence_no = nextSequence();
+    esp_now_send(ROVER_MAC, (uint8_t*)&pkt, sizeof(pkt));
 }

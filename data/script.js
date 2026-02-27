@@ -340,8 +340,8 @@ let roverConnected   = false;
 let hexapodConnected = false;
 let lastRoverTelemetry   = 0;
 let lastHexapodTelemetry = 0;
-let mpuOrigin  = { gx: 0, gy: 0, gz: 0 };
-let mpuCurrent = { gx: 0, gy: 0, gz: 0 };
+let mpuOrigin  = { pitch: 0, roll: 0 };
+let mpuCurrent = { pitch: 0, roll: 0 };
 const lastFlowTrigger = {};
 const TOPO_POS = {
     satellite: { x: 200, y: 135 },
@@ -385,7 +385,7 @@ function initWebSocket() {
         updateConnStatus(false);
         addChat('SYSTEM', 'Lost satellite connection', 'all', 'sys');
         SAT3D.enableAutoSpin();
-        setTimeout(initWebSocket, 5000);
+        setTimeout(initWebSocket, 2000);
     };
     ws.onerror = e => console.error('[WS] Error:', e);
     ws.onmessage = ev => {
@@ -414,16 +414,17 @@ function handleTelemetry(d) {
 // ── Satellite Telemetry ───────────────────────────────────────
 function updateSatTelemetry(d) {
     if (d.gx !== undefined) {
-        mpuCurrent = { gx: d.gx, gy: d.gy, gz: d.gz };
         updateEl('mpu-gx', d.gx.toFixed(2));
         updateEl('mpu-gy', d.gy.toFixed(2));
         updateEl('mpu-gz', d.gz.toFixed(2));
-        // Drive 3D model — direct degree-to-radian mapping, full range
-        const toRad = Math.PI / 180;
-        const dx = (d.gx - mpuOrigin.gx) * toRad;
-        const dy = (d.gy - mpuOrigin.gy) * toRad;
-        const dz = (d.gz - mpuOrigin.gz) * toRad;
-        SAT3D.setRotation(dx + 0.15, dy, dz);
+    }
+    if (d.pitch !== undefined) {
+        mpuCurrent = { pitch: d.pitch, roll: d.roll || 0 };
+        // pitch/roll are real angles in degrees (-90 to +90) from accelerometer
+        // subtract origin so "SET ORIGIN" zeros the view, then convert to radians
+        const rx = (d.pitch - mpuOrigin.pitch) * Math.PI / 180;
+        const rz = (d.roll  - mpuOrigin.roll)  * Math.PI / 180;
+        SAT3D.setRotation(rx + 0.15, 0, rz);
     }
     if (d.temperature !== undefined) updateEl('dht-temp', `${d.temperature.toFixed(1)}°C`);
     if (d.humidity    !== undefined) updateEl('dht-hum',  `${d.humidity.toFixed(0)}%`);
@@ -607,7 +608,8 @@ function updatePill(id, cls, txt) { const e = document.getElementById(id); if (e
 
 // ── MPU Origin calibration ────────────────────────────────────
 function setMpuOrigin() {
-    mpuOrigin = { ...mpuCurrent };
+    mpuOrigin = { pitch: mpuCurrent.pitch, roll: mpuCurrent.roll };
+    SAT3D.setRotation(0.15, 0, 0);   // snap model to neutral immediately
     const btn = document.getElementById('calibrate-btn');
     if (btn) {
         btn.textContent = '✓ ORIGIN SET';
@@ -772,7 +774,7 @@ function initControls() { initNeo(); initFlaps(); initDPad(); }
 // ── Device timeout detection ──────────────────────────────────
 function initDeviceTimeouts() {
     setInterval(() => {
-        const now = Date.now(), T = 5000;
+        const now = Date.now(), T = 15000;
         if (roverConnected   && lastRoverTelemetry   > 0 && (now - lastRoverTelemetry)   > T) {
             roverConnected = false;
             updatePill('rover-status-pill', 'offline', 'OFFLINE');
