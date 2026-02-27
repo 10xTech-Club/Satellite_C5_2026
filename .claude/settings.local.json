@@ -3,7 +3,12 @@
     "allow": [
       "Bash(pio run:*)",
       "Bash(findstr:*)",
-      "Read(//c/Users/dell/Desktop/CheckList/HEXAPOD_FINAL_CODE/Hexapod_Code_Stable_Release/**)"
+      "Read(//c/Users/dell/Desktop/CheckList/HEXAPOD_FINAL_CODE/Hexapod_Code_Stable_Release/**)",
+      "Read(//c/Users/dell/Desktop/CheckList/Rover-ESP32_V3/Rover-ESP32_V3/**)"
+    ],
+    "additionalDirectories": [
+      "C:\\Users\\dell\\Desktop\\CheckList\\Rover-ESP32_V3\\Rover-ESP32_V3\\src",
+      "C:\\Users\\dell\\Desktop\\CheckList\\HEXAPOD_FINAL_CODE\\Hexapod_Code_Stable_Release"
     ]
   }
 }

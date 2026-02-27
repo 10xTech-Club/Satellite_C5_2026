@@ -4,28 +4,25 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Orbital Mission Control</title>
-
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
+    <!-- Background layers -->
     <div class="stars"></div>
     <div class="glass-overlay"></div>
     <div class="scanlines"></div>
 
+    <!-- ── Header ─────────────────────────────────────────── -->
     <header class="mission-header">
         <div class="logo-area">
             <div class="brand-container">
                 <span class="logo-icon">✦</span>
                 <div class="brand-text">
                     <h1>ORBITAL COMMAND</h1>
-                    <span class="system-status"><span class="status-dot"></span> SYSTEM OPTIMAL</span>
+                    <span class="system-status">
+                        <span class="status-dot"></span> SYSTEM OPTIMAL
+                    </span>
                 </div>
             </div>
         </div>
@@ -38,43 +35,37 @@
                 <span class="metric-label">SIGNAL</span>
                 <span class="metric-value text-cyan">98.4%</span>
             </div>
-            <button class="soft-reset-btn" id="soft-reset-btn" onclick="softReset()" title="Soft-reset the satellite — use when data freezes but WiFi is still up">
-                ⟳ RESET SAT
-            </button>
+            <button class="soft-reset-btn" id="soft-reset-btn" onclick="softReset()"
+                    title="Soft-reset the satellite">⟳ RESET SAT</button>
         </div>
     </header>
 
+    <!-- ── Dashboard Grid ─────────────────────────────────── -->
     <main class="dashboard-grid">
 
-        <!-- SATELLITE TELEMETRY + 3D -->
+        <!-- SATELLITE SYSTEMS + 3D Viewer -->
         <section class="panel satellite-panel interactive-hover">
             <div class="panel-header">
                 <span class="panel-icon">🛰️</span>
                 <h2 class="panel-title">SATELLITE SYSTEMS</h2>
             </div>
 
+            <!-- 3D Canvas rendered by SAT3D in script.js -->
             <div id="sat-3d-container"></div>
 
+            <!-- MPU-6050 gyro readout -->
             <div class="data-section">
                 <div class="modern-grid mini">
-                    <div class="modern-stat">
-                        <label>GX</label>
-                        <span id="mpu-gx">0.00</span>
-                    </div>
-                    <div class="modern-stat">
-                        <label>GY</label>
-                        <span id="mpu-gy">0.00</span>
-                    </div>
-                    <div class="modern-stat">
-                        <label>GZ</label>
-                        <span id="mpu-gz">0.00</span>
-                    </div>
+                    <div class="modern-stat"><label>GX</label><span id="mpu-gx">0.00</span></div>
+                    <div class="modern-stat"><label>GY</label><span id="mpu-gy">0.00</span></div>
+                    <div class="modern-stat"><label>GZ</label><span id="mpu-gz">0.00</span></div>
                 </div>
                 <div style="text-align:center; margin-top:0.5rem;">
                     <button class="calibrate-btn" id="calibrate-btn" onclick="setMpuOrigin()">⌖ SET ORIGIN</button>
                 </div>
             </div>
 
+            <!-- Power & environment -->
             <div class="telemetry-expanded">
                 <div class="data-section">
                     <div class="data-group-label">POWER SUBSYSTEM</div>
@@ -82,78 +73,90 @@
                         <div class="power-stat">
                             <div class="stat-info">
                                 <span>SOLAR ARRAY</span>
-                                <span id="sat-solar" class="text-green">14.2W</span>
+                                <span id="sat-solar" class="text-green">0.0W</span>
                             </div>
-                            <div class="mini-bar"><div class="fill green" id="bar-solar" style="width: 70%"></div></div>
+                            <div class="mini-bar"><div class="fill green" id="bar-solar" style="width:0%"></div></div>
                         </div>
                         <div class="power-stat">
                             <div class="stat-info">
                                 <span>MAIN BATTERY</span>
-                                <span id="sat-batt" class="text-cyan">92%</span>
+                                <span id="sat-batt" class="text-cyan">0%</span>
                             </div>
-                            <div class="mini-bar"><div class="fill cyan" id="bar-batt" style="width: 92%"></div></div>
+                            <div class="mini-bar"><div class="fill cyan" id="bar-batt" style="width:0%"></div></div>
                         </div>
                     </div>
                 </div>
-
                 <div class="data-section">
                     <div class="data-group-label">ENVIRONMENTAL (DHT11)</div>
                     <div class="env-row">
                         <div class="env-chip">
                             <span class="label">TEMP</span>
-                            <span class="value" id="dht-temp">24.5°C</span>
+                            <span class="value" id="dht-temp">--</span>
                         </div>
                         <div class="env-chip">
                             <span class="label">HUM</span>
-                            <span class="value" id="dht-hum">42%</span>
+                            <span class="value" id="dht-hum">--</span>
                         </div>
                     </div>
                 </div>
             </div>
         </section>
 
-        <!-- TOPOLOGY -->
+        <!-- NETWORK TOPOLOGY -->
         <section class="panel topology-panel">
             <div class="panel-header">
                 <span class="panel-icon">🌐</span>
                 <h2 class="panel-title">NETWORK TOPOLOGY</h2>
             </div>
             <div class="topology-canvas">
-                <svg width="100%" height="100%" viewBox="0 0 400 300" class="topology-svg" id="topology-svg">
-                    <!-- Always visible: Earth ↔ Satellite -->
-                    <line id="topo-line-earth-sat" x1="200" y1="50" x2="200" y2="135" class="topo-line active-pulse" />
-                    <!-- Shown only when rover connects -->
-                    <line id="topo-line-sat-rover" x1="200" y1="135" x2="100" y2="240" class="topo-line active-pulse topo-hidden" />
-                    <!-- Shown only when hexapod connects -->
-                    <line id="topo-line-sat-hex"   x1="200" y1="135" x2="300" y2="240" class="topo-line active-pulse topo-hidden" />
-                    <!-- Shown only when both are connected -->
-                    <line id="topo-line-rover-hex" x1="100" y1="240" x2="300" y2="240" class="topo-line active-pulse topo-hidden" />
-                    <!-- Hotspot side-paths (match their device) -->
-                    <path id="topo-hotspot-rover" d="M 180,50 L 50,50 L 50,240 L 80,240"   class="topo-line dashed flowing topo-hidden" />
-                    <path id="topo-hotspot-hex"   d="M 220,50 L 350,50 L 350,240 L 320,240" class="topo-line dashed flowing topo-hidden" />
+                <svg width="100%" height="100%" viewBox="0 0 400 300"
+                     class="topology-svg" id="topology-svg">
 
-                    <!-- Data-flow animation layer (JS appends/removes circles here) -->
+                    <!-- Static link: Earth ↔ Satellite -->
+                    <line id="topo-line-earth-sat"
+                          x1="200" y1="50" x2="200" y2="135"
+                          class="topo-line active-pulse"/>
+
+                    <!-- Dynamic links (hidden until devices connect) -->
+                    <line id="topo-line-sat-rover"
+                          x1="200" y1="135" x2="100" y2="240"
+                          class="topo-line active-pulse topo-hidden"/>
+                    <line id="topo-line-sat-hex"
+                          x1="200" y1="135" x2="300" y2="240"
+                          class="topo-line active-pulse topo-hidden"/>
+                    <line id="topo-line-rover-hex"
+                          x1="100" y1="240" x2="300" y2="240"
+                          class="topo-line active-pulse topo-hidden"/>
+
+                    <!-- Hotspot side-paths -->
+                    <path id="topo-hotspot-rover"
+                          d="M 180,50 L 50,50 L 50,240 L 80,240"
+                          class="topo-line dashed flowing topo-hidden"/>
+                    <path id="topo-hotspot-hex"
+                          d="M 220,50 L 350,50 L 350,240 L 320,240"
+                          class="topo-line dashed flowing topo-hidden"/>
+
+                    <!-- Data-flow animation layer -->
                     <g id="topo-flow-layer"></g>
 
-                    <!-- Always visible: Earth + Satellite -->
-                    <g transform="translate(200, 50)" class="topo-node" id="topo-node-earth">
-                        <circle r="22" class="node-bg" />
+                    <!-- Nodes -->
+                    <g transform="translate(200,50)" class="topo-node" id="topo-node-earth">
+                        <circle r="22" class="node-bg"/>
                         <text y="5" class="node-emoji">🌍</text>
                         <text y="35" class="node-label">EARTH</text>
                     </g>
-                    <g transform="translate(200, 135)" class="topo-node" id="topo-node-satellite">
-                        <circle r="22" class="node-bg active" />
+                    <g transform="translate(200,135)" class="topo-node" id="topo-node-satellite">
+                        <circle r="22" class="node-bg active"/>
                         <text y="5" class="node-emoji">🛰️</text>
                         <text y="35" class="node-label">SAT-01</text>
                     </g>
-                    <!-- Hidden until connected -->
-                    <g transform="translate(100, 240)" class="topo-node topo-hidden" id="topo-node-rover">
-                        <circle r="22" class="node-bg" />
+                    <g transform="translate(100,240)" class="topo-node topo-hidden" id="topo-node-rover">
+                        <circle r="22" class="node-bg"/>
                         <text y="5" class="node-emoji">🚙</text>
                         <text y="35" class="node-label">ROVER</text>
                     </g>
-                    <g transform="translate(300, 240)" class="topo-node topo-hidden" id="topo-node-hexapod">
-                        <circle r="22" class="node-bg" />
+                    <g transform="translate(300,240)" class="topo-node topo-hidden" id="topo-node-hexapod">
+                        <circle r="22" class="node-bg"/>
                         <text y="5" class="node-emoji">🕷️</text>
                         <text y="35" class="node-label">HEXAPOD</text>
                     </g>
@@ -163,7 +166,7 @@
             </div>
         </section>
 
-        <!-- NEOPIXEL CONTROLLER -->
+        <!-- NEOPIXEL ARRAY -->
         <section class="panel interactive-hover">
             <div class="panel-header">
                 <span class="panel-icon">💡</span>
@@ -264,18 +267,9 @@
                 <div class="subsystem-box">
                     <div class="data-group-label">SENSOR OVERRIDE</div>
                     <div class="modern-grid mini">
-                        <div class="modern-stat">
-                            <label>RAD</label>
-                            <span id="sat-rad">0.12</span>
-                        </div>
-                        <div class="modern-stat">
-                            <label>RSSI</label>
-                            <span id="sat-rssi">-45</span>
-                        </div>
-                        <div class="modern-stat">
-                            <label>VOC</label>
-                            <span id="sat-voc">22</span>
-                        </div>
+                        <div class="modern-stat"><label>RAD</label><span id="sat-rad">0.12</span></div>
+                        <div class="modern-stat"><label>RSSI</label><span id="sat-rssi">-45</span></div>
+                        <div class="modern-stat"><label>VOC</label><span id="sat-voc">22</span></div>
                     </div>
                 </div>
             </div>
@@ -306,14 +300,8 @@
 
             <div class="data-section">
                 <div class="stats-row grid-2">
-                    <div class="mini-card">
-                        <span class="card-label">STATE</span>
-                        <span class="card-value" id="rover-state">--</span>
-                    </div>
-                    <div class="mini-card">
-                        <span class="card-label">MODE</span>
-                        <span class="card-value text-cyan" id="rover-mode">--</span>
-                    </div>
+                    <div class="mini-card"><span class="card-label">STATE</span><span class="card-value" id="rover-state">--</span></div>
+                    <div class="mini-card"><span class="card-label">MODE</span><span class="card-value text-cyan" id="rover-mode">--</span></div>
                 </div>
             </div>
 
@@ -359,9 +347,9 @@
                     </div>
                     <div class="mini-card hex-gas-card">
                         <span class="card-label">💨 CO₂ EST.</span>
-                        <div style="display:flex;align-items:baseline;gap:0.2rem;">
+                        <div style="display:flex; align-items:baseline; gap:0.2rem;">
                             <span class="card-value" id="hex-co2-value">--</span>
-                            <span style="font-size:0.6rem;color:var(--text-secondary);">ppm</span>
+                            <span style="font-size:0.6rem; color:var(--text-secondary);">ppm</span>
                         </div>
                         <div class="hex-gas-bar"><div class="hex-gas-fill hex-co2-fill" id="hex-co2-bar"></div></div>
                         <span class="hex-gas-cat" id="hex-co2-status">--</span>
@@ -410,7 +398,7 @@
                 <input type="text" id="groupChatInput" class="sat-chat-input"
                        placeholder="Broadcast message..." maxlength="120"
                        onkeydown="if(event.key==='Enter') sendGroupChat()">
-                <button class="panel-action-btn" onclick="sendGroupChat()">SEND &#x27A4;</button>
+                <button class="panel-action-btn" onclick="sendGroupChat()">SEND ➤</button>
             </div>
         </section>
 
