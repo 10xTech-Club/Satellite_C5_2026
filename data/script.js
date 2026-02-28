@@ -842,6 +842,45 @@ function addChat(from, msg, to, dir) {
 function openRoverDashboard()   { window.location.href = 'rover.html'; }
 function openHexapodDashboard() { window.location.href = 'hexapod.html'; }
 
+// ── Demo Power Data ───────────────────────────────────────────
+// Smoothly glides to random targets every 60 s.
+// Pauses automatically when real satellite power telemetry arrives.
+(function initDemoPower() {
+    let solarCur = 11.4, battCur = 72.0;
+    let solarTgt = 13.8, battTgt = 76.0;
+    let lastRealPower = 0;   // timestamp of last real telemetry update
+
+    // Expose so updateSatTelemetry can stamp it
+    window._demoPowerRealData = () => { lastRealPower = Date.now(); };
+
+    function pickTargets() {
+        solarTgt = 6 + Math.random() * 12;   // 6 – 18 W
+        battTgt  = 58 + Math.random() * 36;  // 58 – 94 %
+    }
+
+    // Interpolate every 120 ms — smooth glide toward current target
+    setInterval(() => {
+        if (Date.now() - lastRealPower < 8000) return;   // real data active — stand aside
+
+        solarCur += (solarTgt - solarCur) * 0.025;
+        battCur  += (battTgt  - battCur)  * 0.018;
+
+        updateEl('sat-solar', `${solarCur.toFixed(1)}W`);
+        updateBar('bar-solar', (solarCur / 20) * 100);
+        updateEl('sat-batt',   `${Math.round(battCur)}%`);
+        updateBar('bar-batt',  battCur);
+    }, 120);
+
+    // New random targets every 60 seconds
+    setInterval(pickTargets, 60000);
+
+    // Kick off first display immediately
+    updateEl('sat-solar', `${solarCur.toFixed(1)}W`);
+    updateBar('bar-solar', (solarCur / 20) * 100);
+    updateEl('sat-batt',   `${Math.round(battCur)}%`);
+    updateBar('bar-batt',  battCur);
+})();
+
 // ── Legacy stubs ──────────────────────────────────────────────
 function addLog() {}
 function sendRoverCommand(c)   { sendDevCmd('rover',   c); }
